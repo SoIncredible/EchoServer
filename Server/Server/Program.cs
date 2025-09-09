@@ -3,17 +3,23 @@ using System.Net.Sockets;
 
 namespace EchorServer
 {
-    class ClientState
+    public class ClientState
     {
         public Socket Socket;
+        
         public byte[] ReadBuffer = new byte[1024];
         
+        public int hp = -100;
+        public float x = 0;
+        public float y = 0;
+        public float z = 0;
+        public float eulY = 0;
     }
     
     class MainClass
     {
         private static Socket _listenfd;
-        static Dictionary<Socket, ClientState> clients = new Dictionary<Socket, ClientState>();
+        public static Dictionary<Socket, ClientState> clients = new Dictionary<Socket, ClientState>();
         
         public static void Main(string[] args)
         {
@@ -69,7 +75,6 @@ namespace EchorServer
 
         public static bool ReadClientfd(Socket clientfd)
         {
-            Console.WriteLine($"ReadClientfd {clientfd.RemoteEndPoint}");
             var state = clients[clientfd];
             var count = 0;
             try
@@ -78,6 +83,10 @@ namespace EchorServer
             }
             catch(SocketException ex)
             {
+                var mei = typeof(EventHandler).GetMethod("OnDisconnect");
+                object[] ob = [state];
+                mei.Invoke(null, ob);
+                
                 clientfd.Close();
                 clients.Remove(clientfd);
                 Console.WriteLine("SocketException: " + ex.ToString());
@@ -86,23 +95,35 @@ namespace EchorServer
 
             if (count == 0)
             {
+                var mei = typeof(EventHandler).GetMethod("OnDisconnect");
+                object[] ob = [state];
+                mei.Invoke(null, ob);
+                
                 clientfd.Close();
                 clients.Remove(clientfd);
                 Console.WriteLine("Client fd closed");
                 return false;
             }
             
-            // 广播
             // 这里转发
             var recvStr = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 0, count);
-            Console.WriteLine("Reveive" + recvStr);
-            var sendStr = recvStr;
-            var sendBytes = System.Text.Encoding.UTF8.GetBytes(sendStr);
-            foreach (var cs in clients.Values)
-            {
-                cs.Socket.Send(sendBytes);
-            }
+            var split = recvStr.Split('|');
+            Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + recvStr);
             
+            var msgName = split[0];
+            var msgArgs = split[1];
+            var funcName = "Msg" + msgName;
+            var mi = typeof(MsgHandler).GetMethod(funcName);
+            object[] o = [state, msgArgs];
+            mi.Invoke(null, o);
+            
+            // var sendStr = recvStr;
+            // var sendBytes = System.Text.Encoding.UTF8.GetBytes(sendStr);
+            // foreach (var cs in clients.Values)
+            // {
+            //     cs.Socket.Send(sendBytes);
+            // }
+            //
             return true;
         }        
         // private static void AcceptCallback(IAsyncResult ar)
@@ -166,5 +187,12 @@ namespace EchorServer
         //         Console.WriteLine("[Server] Error: {0}", e);
         //     }
         // }
+
+        public static void Send(ClientState cs, string msg)
+        {
+            var sendBytes = System.Text.Encoding.UTF8.GetBytes(msg);
+            cs.Socket.Send(sendBytes);
+            Console.WriteLine("[SendMsg] IP: " + cs.Socket.RemoteEndPoint + " msg: " + msg);
+        }
     }    
 }
