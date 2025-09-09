@@ -106,16 +106,22 @@ namespace EchorServer
             }
             
             // 这里转发
+            // 首先要在这里解决粘包问题 解决方案 用#来表示一条协议结束
             var recvStr = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 0, count);
-            var split = recvStr.Split('|');
-            Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + recvStr);
+            var protos = recvStr.Split('#', StringSplitOptions.RemoveEmptyEntries); // 处理粘包问题
+            foreach (var singleProto in protos)
+            {
+                var split = singleProto.Split('|');
+                Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + recvStr);
             
-            var msgName = split[0];
-            var msgArgs = split[1];
-            var funcName = "Msg" + msgName;
-            var mi = typeof(MsgHandler).GetMethod(funcName);
-            object[] o = [state, msgArgs];
-            mi.Invoke(null, o);
+                var msgName = split[0];
+                var msgArgs = split[1];
+                var funcName = "Msg" + msgName;
+                var mi = typeof(MsgHandler).GetMethod(funcName);
+                object[] o = [state, msgArgs];
+                mi.Invoke(null, o);
+            }
+           
             
             // var sendStr = recvStr;
             // var sendBytes = System.Text.Encoding.UTF8.GetBytes(sendStr);
@@ -190,6 +196,10 @@ namespace EchorServer
 
         public static void Send(ClientState cs, string msg)
         {
+            if (!msg.EndsWith("#"))
+            {
+                msg += "#";
+            }
             var sendBytes = System.Text.Encoding.UTF8.GetBytes(msg);
             cs.Socket.Send(sendBytes);
             Console.WriteLine("[SendMsg] IP: " + cs.Socket.RemoteEndPoint + " msg: " + msg);
