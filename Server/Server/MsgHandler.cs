@@ -108,4 +108,20 @@ public class MsgHandler
             }
         }
     }
+
+    /// <summary>
+    /// 聊天消息
+    /// </summary>
+    /// <param name="clientState"></param>
+    /// <param name="msg"></param>
+    public static void MsgDialog(ClientState clientState, string msg)
+    {
+        // 原封不动的转发给所有人
+        var sendStr = "Dialog|" + msg;
+
+        foreach (var cs in MainClass.clients.Values)
+        {
+            MainClass.Send(cs, sendStr);
+        }
+    }
 }
