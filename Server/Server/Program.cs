@@ -5,9 +5,10 @@ namespace EchorServer
 {
     public class ClientState
     {
+        public const int BUFFER_SIZE = 1024;
         public Socket Socket;
-        
-        public byte[] ReadBuffer = new byte[1024];
+        public int bufferCount; // 像客户端一样, 有一个表示下标的角色
+        public byte[] ReadBuffer = new byte[BUFFER_SIZE];
         
         public int hp = -100;
         public float x = 0;
@@ -58,6 +59,7 @@ namespace EchorServer
                     }
                     else
                     {
+                        // 为啥这里不用BeginReceive
                         ReadClientfd(socket);
                     }
                 }
@@ -79,7 +81,8 @@ namespace EchorServer
             var count = 0;
             try
             {
-                count = clientfd.Receive(state.ReadBuffer);
+                count = clientfd.Receive(state.ReadBuffer, state.bufferCount, ClientState.BUFFER_SIZE - state.bufferCount, SocketFlags.None);
+                state.bufferCount += count;
             }
             catch(SocketException ex)
             {
@@ -105,22 +108,26 @@ namespace EchorServer
                 return false;
             }
             
+            
+            OnReceiveClientData(clientfd);
             // 这里转发
             // 首先要在这里解决粘包问题 解决方案 用#来表示一条协议结束
-            var recvStr = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 0, count);
-            var protos = recvStr.Split('#', StringSplitOptions.RemoveEmptyEntries); // 处理粘包问题
-            foreach (var singleProto in protos)
-            {
-                var split = singleProto.Split('|');
-                Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + recvStr);
+            // var recvStr = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 0, count);
             
-                var msgName = split[0];
-                var msgArgs = split[1];
-                var funcName = "Msg" + msgName;
-                var mi = typeof(MsgHandler).GetMethod(funcName);
-                object[] o = [state, msgArgs];
-                mi.Invoke(null, o);
-            }
+            // 客户端和服务端应该是一样的代码吧?
+            // var protos = recvStr.Split('#', StringSplitOptions.RemoveEmptyEntries); // 处理粘包问题
+            // foreach (var singleProto in protos)
+            // {
+            //     var split = singleProto.Split('|');
+            //     Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + recvStr);
+            //
+            //     var msgName = split[0];
+            //     var msgArgs = split[1];
+            //     var funcName = "Msg" + msgName;
+            //     var mi = typeof(MsgHandler).GetMethod(funcName);
+            //     object[] o = [state, msgArgs];
+            //     mi.Invoke(null, o);
+            // }
            
             
             // var sendStr = recvStr;
@@ -131,7 +138,51 @@ namespace EchorServer
             // }
             //
             return true;
-        }        
+        }
+
+        private static void OnReceiveClientData(Socket clientfd)
+        {
+            var state = clients[clientfd];
+            
+            // 如果当前socket的缓冲区中的数据量小于2字节, 说明啥也没有
+            if (state.bufferCount < 2) // 这时候什么也不做
+            {
+                return;
+            }
+            
+            // 添加字节序处理
+            short bodyLength;
+            // if (BitConverter.IsLittleEndian)
+            // {
+            //     bodyLength = (short)((state.ReadBuffer[0] << 8) | state.ReadBuffer[1]);
+            // }
+            // else
+            {
+                bodyLength = BitConverter.ToInt16(state.ReadBuffer, 0);
+            }
+            
+            // 如果当前socket的缓冲区中的数据量大于2字节, 但是根据这两字节的数据转成的消息体长度 比实际的bufferCount要长 说明这个消息不完整
+            if (state.bufferCount < 2 + bodyLength)
+            {
+                return;
+            }
+            
+            var singleProto = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 2, bodyLength);
+            var split = singleProto.Split('|');
+            Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + singleProto);
+            
+            var msgName = split[0];
+            var msgArgs = split[1];
+            var funcName = "Msg" + msgName;
+            var mi = typeof(MsgHandler).GetMethod(funcName);
+            object[] o = [state, msgArgs];
+            mi.Invoke(null, o);
+
+            var start = 2 + bodyLength;
+            state.bufferCount -= start;
+            Array.Copy(state.ReadBuffer, start, state.ReadBuffer, 0, state.bufferCount);
+            OnReceiveClientData(clientfd);
+        }
         // private static void AcceptCallback(IAsyncResult ar)
         // {
         //     try
@@ -196,11 +247,18 @@ namespace EchorServer
 
         public static void Send(ClientState cs, string msg)
         {
-            if (!msg.EndsWith("#"))
-            {
-                msg += "#";
-            }
-            var sendBytes = System.Text.Encoding.UTF8.GetBytes(msg);
+            var bodyBytes = System.Text.Encoding.UTF8.GetBytes(msg);
+            // 在这里标识一下发送数据的长度
+            var sendBodyLength = (short)bodyBytes.Length;
+            var lenBytes = BitConverter.GetBytes(sendBodyLength);
+            // if (BitConverter.IsLittleEndian)
+            // {
+            //     // 这里只转换了表示协议长度的位?
+            //     Console.WriteLine("[Send] Reverse lenBytes");
+            //     lenBytes.Reverse();
+            // }
+            
+            var sendBytes = lenBytes.Concat(bodyBytes).ToArray();
             cs.Socket.Send(sendBytes);
             Console.WriteLine("[SendMsg] IP: " + cs.Socket.RemoteEndPoint + " msg: " + msg);
         }
