@@ -3,12 +3,35 @@ using System.Net.Sockets;
 
 namespace EchorServer
 {
+    /// <summary>
+    /// 和客户端部分ByteArray的结构是一样的.
+    /// TODO Eddie 需要测试 粘包、半包、线程冲突、大小端问题的处理代码是否生效
+    /// </summary>
+    public class ByteArray
+    {
+        public byte[] bytes; // 缓冲区长度
+
+        public int readIdx; // 读取的idx
+        public int writeIdx; // 写入的idx
+        
+        public int length => writeIdx - readIdx;
+
+        public ByteArray(byte[] bytes)
+        {
+            this.bytes = bytes;
+            readIdx = 0;
+            writeIdx = bytes.Length;
+        }
+    }
+    
     public class ClientState
     {
         public const int BUFFER_SIZE = 1024;
         public Socket Socket;
         public int bufferCount; // 像客户端一样, 有一个表示下标的角色
         public byte[] ReadBuffer = new byte[BUFFER_SIZE];
+        
+        public Queue<ByteArray> sendQueue = new Queue<ByteArray>();
         
         public int hp = -100;
         public float x = 0;
@@ -254,14 +277,51 @@ namespace EchorServer
             var lenBytes = BitConverter.GetBytes(sendBodyLength);
             if (!BitConverter.IsLittleEndian)
             {
-                // 这里只转换了表示协议长度的位?
                 Console.WriteLine("[Send] Reverse lenBytes");
                 lenBytes.Reverse();
             }
             
             var sendBytes = lenBytes.Concat(bodyBytes).ToArray();
-            cs.Socket.Send(sendBytes);
+            var sendBa = new ByteArray(sendBytes);
+            cs.sendQueue.Enqueue(sendBa);
+            
+            // 如果当前发送队列里面只有一个待发送消息, 就直接把这个消息发送出去
+            if (cs.sendQueue.Count == 1)
+            {
+                cs.Socket.BeginSend(sendBa.bytes, sendBa.readIdx, sendBa.length, 0, SendCallback, cs);
+            }
+            
+            // cs.Socket.Send(sendBytes);
             Console.WriteLine("[SendMsg] IP: " + cs.Socket.RemoteEndPoint + " msg: " + msg);
+        }
+
+        /// <summary>
+        /// 这我该怎么知道是哪个Socket啊?
+        /// </summary>
+        /// <param name="ar"></param>
+        private static void SendCallback(IAsyncResult ar)
+        {
+            var clientState = (ClientState)ar.AsyncState;
+            
+            var sendQueue = clientState.sendQueue; 
+            // 拿到了发送数据的长度
+            var sendCount = clientState.Socket.EndSend(ar);
+
+            // 首先拿到第一个
+            var sendArray = sendQueue.Peek();
+            sendArray.readIdx += sendCount;
+            if (sendArray.length == 0)
+            {
+                sendQueue.Dequeue();
+                sendQueue.TryPeek(out sendArray);
+            }
+
+            // 如果 上一条数据发送不完整, 或者上一条数据发送完整, 队列中有残留的待发送数据
+            if (sendArray != null)
+            {
+                clientState.Socket.BeginSend(sendArray.bytes, sendArray.readIdx, sendArray.length, 0, SendCallback, clientState);
+            }
+
         }
     }    
 }
