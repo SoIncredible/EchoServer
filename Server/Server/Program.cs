@@ -9,18 +9,154 @@ namespace EchorServer
     /// </summary>
     public class ByteArray
     {
+        public const int DefaultBufferSize = 1024;
+        
+        // 初始长度
+        public int initSize;
+        public int capacity; // 实际的容量
+        
         public byte[] bytes; // 缓冲区长度
 
         public int readIdx; // 读取的idx
         public int writeIdx; // 写入的idx
         
-        public int length => writeIdx - readIdx;
+        /// <summary>
+        /// buffer中有效的数据长度
+        /// </summary>
+        public int ValidDataLength => writeIdx - readIdx;
+        public int remain => capacity - writeIdx;
 
         public ByteArray(byte[] bytes)
         {
             this.bytes = bytes;
             readIdx = 0;
             writeIdx = bytes.Length;
+            capacity = bytes.Length;
+        }
+
+        public ByteArray(int bufferLength = DefaultBufferSize)
+        {
+            initSize = bufferLength;
+            capacity = bufferLength;
+            bytes = new byte[bufferLength];
+            readIdx = 0;
+            writeIdx = 0;
+        }
+
+        /// <summary>
+        /// 给ByteArray扩容
+        /// </summary>
+        /// <param name="newSize"></param>
+        public void Resize(int newSize)
+        {
+            if (newSize < initSize) return; // 不合法操作
+            if (newSize < ValidDataLength) return; // 不能比当前buffer中有效数据长度还要小
+            var n = 1;
+            while(n < newSize) n *= 2; // 以 2的n次幂扩张数组
+            capacity = n;
+            var newBytes = new byte[capacity];
+            Array.Copy(bytes, readIdx, newBytes, 0, ValidDataLength);
+            bytes = newBytes;
+            writeIdx = ValidDataLength;
+            readIdx = 0;
+        }
+
+        public void CheckAndMoveBytes()
+        {
+            if (ValidDataLength < 8)
+            {
+                MoveBytes();
+            }
+        }
+        
+        /// <summary>
+        /// 移动数组内容
+        /// </summary>
+        public void MoveBytes()
+        {
+            Array.Copy(bytes, readIdx, bytes, 0, ValidDataLength);
+            writeIdx = ValidDataLength;
+            readIdx = 0;
+        }
+
+        /// <summary>
+        /// 写入操作
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="offset"></param>
+        /// <param name="count"></param>
+        /// <returns></returns>
+        public int Write(byte[] buffer, int offset, int count)
+        {
+            CheckAndMoveBytes();
+            // 需要检查扩容
+            if (count > remain)
+            {
+                Resize(ValidDataLength + count);
+            }
+            Array.Copy(buffer, offset, bytes, writeIdx, count);
+            writeIdx += count;
+            return count;
+        }
+
+        /// <summary>
+        /// 读取操作
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="offset"></param>
+        /// <param name="count"></param>
+        /// <returns></returns>
+        public int Read(byte[] buffer, int offset, int count)
+        {
+            count = Math.Min(ValidDataLength, count);
+            Array.Copy(bytes, readIdx, buffer, offset, count);
+            readIdx += count;   
+            CheckAndMoveBytes();
+            return count;
+        }
+        
+        /// <summary>
+        /// 读一个 Int16
+        /// </summary>
+        /// <returns></returns>
+        public short ReadInt16()
+        {
+            short bodyLength;
+            // 大小端问题处理
+            if (!BitConverter.IsLittleEndian)
+            {
+                // 自己处理
+                bodyLength = (short)(bytes[readIdx + 1] << 8 | bytes[readIdx]);
+            }
+            else
+            {
+                bodyLength = BitConverter.ToInt16(bytes, readIdx);
+            }
+            readIdx += 2;
+            CheckAndMoveBytes();
+            return bodyLength;
+        }
+
+        /// <summary>
+        /// 读一个 Int32
+        /// </summary>
+        /// <returns></returns>
+        public int ReadInt32()
+        {
+            int bodyLength;
+
+            if (!BitConverter.IsLittleEndian)
+            {
+                bodyLength = bytes[readIdx + 3] << 24 | bytes[readIdx + 2] << 16 | bytes[readIdx + 1] << 8 | bytes[readIdx];
+            }
+            else
+            {
+                bodyLength = BitConverter.ToInt32(bytes, readIdx);
+            }
+            
+            readIdx += 4;
+            CheckAndMoveBytes();
+            return bodyLength;
         }
     }
     
@@ -28,8 +164,9 @@ namespace EchorServer
     {
         public const int BUFFER_SIZE = 1024;
         public Socket Socket;
-        public int bufferCount; // 像客户端一样, 有一个表示下标的角色
-        public byte[] ReadBuffer = new byte[BUFFER_SIZE];
+        // public int bufferCount; // 像客户端一样, 有一个表示下标的角色
+        // public byte[] ReadBuffer = new byte[BUFFER_SIZE];
+        public ByteArray ReadBuffer = new ByteArray();
         
         public Queue<ByteArray> sendQueue = new Queue<ByteArray>();
         
@@ -104,8 +241,8 @@ namespace EchorServer
             var count = 0;
             try
             {
-                count = clientfd.Receive(state.ReadBuffer, state.bufferCount, ClientState.BUFFER_SIZE - state.bufferCount, SocketFlags.None);
-                state.bufferCount += count;
+                count = clientfd.Receive(state.ReadBuffer.bytes, state.ReadBuffer.writeIdx, state.ReadBuffer.remain, SocketFlags.None);
+                state.ReadBuffer.writeIdx += count;
             }
             catch(SocketException ex)
             {
@@ -131,8 +268,14 @@ namespace EchorServer
                 return false;
             }
             
-            
             OnReceiveClientData(clientfd);
+
+            if (state.ReadBuffer.remain < 8)
+            {
+                state.ReadBuffer.MoveBytes();
+                state.ReadBuffer.Resize(state.ReadBuffer.capacity * 2);
+            }
+            
             // 这里转发
             // 首先要在这里解决粘包问题 解决方案 用#来表示一条协议结束
             // var recvStr = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 0, count);
@@ -168,30 +311,24 @@ namespace EchorServer
             var state = clients[clientfd];
             
             // 如果当前socket的缓冲区中的数据量小于2字节, 说明啥也没有
-            if (state.bufferCount < 2) // 这时候什么也不做
+            if (state.ReadBuffer.ValidDataLength < 2) // 这时候什么也不做
             {
                 return;
             }
             
             // 添加字节序处理
-            short bodyLength;
-            if (!BitConverter.IsLittleEndian)
-            {
-                // 传过来的是小端数据 如果当前是大端的机器 那么
-                bodyLength = (short)((state.ReadBuffer[1] << 8) | state.ReadBuffer[0]);
-            }
-            else
-            {
-                bodyLength = BitConverter.ToInt16(state.ReadBuffer, 0);
-            }
+            short bodyLength = state.ReadBuffer.ReadInt16();
             
             // 如果当前socket的缓冲区中的数据量大于2字节, 但是根据这两字节的数据转成的消息体长度 比实际的bufferCount要长 说明这个消息不完整
-            if (state.bufferCount < 2 + bodyLength)
+            if (state.ReadBuffer.ValidDataLength < bodyLength)
             {
                 return;
             }
             
-            var singleProto = System.Text.Encoding.UTF8.GetString(state.ReadBuffer, 2, bodyLength);
+            var readBuffer = new byte[bodyLength];
+            state.ReadBuffer.Read(readBuffer, 0, bodyLength);
+            
+            var singleProto = System.Text.Encoding.UTF8.GetString(readBuffer);
             var split = singleProto.Split('|');
             Console.WriteLine("[ReceiveMsg] IP:" + clientfd.RemoteEndPoint + " msg: " + singleProto);
             
@@ -201,10 +338,7 @@ namespace EchorServer
             var mi = typeof(MsgHandler).GetMethod(funcName);
             object[] o = [state, msgArgs];
             mi.Invoke(null, o);
-
-            var start = 2 + bodyLength;
-            state.bufferCount -= start;
-            Array.Copy(state.ReadBuffer, start, state.ReadBuffer, 0, state.bufferCount);
+            
             OnReceiveClientData(clientfd);
         }
         // private static void AcceptCallback(IAsyncResult ar)
@@ -282,8 +416,11 @@ namespace EchorServer
             }
             
             var sendBytes = lenBytes.Concat(bodyBytes).ToArray();
-            var sendBa = new ByteArray(sendBytes);
-
+            
+            // var sendBa = new ByteArray(sendBytes);
+            var sendBa = new ByteArray();
+            sendBa.Write(sendBytes, 0, sendBytes.Length);
+            
             int count;
 
             lock (cs.sendQueue)
@@ -295,7 +432,7 @@ namespace EchorServer
             // 如果当前发送队列里面只有一个待发送消息, 就直接把这个消息发送出去
             if (count == 1)
             {
-                cs.Socket.BeginSend(sendBa.bytes, sendBa.readIdx, sendBa.length, 0, SendCallback, cs);
+                cs.Socket.BeginSend(sendBa.bytes, sendBa.readIdx, sendBa.ValidDataLength, 0, SendCallback, cs);
             }
             
             // cs.Socket.Send(sendBytes);
@@ -321,7 +458,7 @@ namespace EchorServer
                 sendArray = sendQueue.Peek();
             }
             sendArray.readIdx += sendCount;
-            if (sendArray.length == 0)
+            if (sendArray.ValidDataLength == 0)
             {
                 lock (sendQueue)
                 {
@@ -333,7 +470,7 @@ namespace EchorServer
             // 如果 上一条数据发送不完整, 或者上一条数据发送完整, 队列中有残留的待发送数据
             if (sendArray != null)
             {
-                clientState.Socket.BeginSend(sendArray.bytes, sendArray.readIdx, sendArray.length, 0, SendCallback, clientState);
+                clientState.Socket.BeginSend(sendArray.bytes, sendArray.readIdx, sendArray.ValidDataLength, 0, SendCallback, clientState);
             }
 
         }
