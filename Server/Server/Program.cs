@@ -283,10 +283,17 @@ namespace EchorServer
             
             var sendBytes = lenBytes.Concat(bodyBytes).ToArray();
             var sendBa = new ByteArray(sendBytes);
-            cs.sendQueue.Enqueue(sendBa);
+
+            int count;
+
+            lock (cs.sendQueue)
+            {
+                cs.sendQueue.Enqueue(sendBa);
+                count = cs.sendQueue.Count;
+            }
             
             // 如果当前发送队列里面只有一个待发送消息, 就直接把这个消息发送出去
-            if (cs.sendQueue.Count == 1)
+            if (count == 1)
             {
                 cs.Socket.BeginSend(sendBa.bytes, sendBa.readIdx, sendBa.length, 0, SendCallback, cs);
             }
@@ -308,12 +315,19 @@ namespace EchorServer
             var sendCount = clientState.Socket.EndSend(ar);
 
             // 首先拿到第一个
-            var sendArray = sendQueue.Peek();
+            ByteArray sendArray;
+            lock (sendQueue)
+            {
+                sendArray = sendQueue.Peek();
+            }
             sendArray.readIdx += sendCount;
             if (sendArray.length == 0)
             {
-                sendQueue.Dequeue();
-                sendQueue.TryPeek(out sendArray);
+                lock (sendQueue)
+                {
+                    sendQueue.Dequeue();
+                    sendQueue.TryPeek(out sendArray);
+                }
             }
 
             // 如果 上一条数据发送不完整, 或者上一条数据发送完整, 队列中有残留的待发送数据
