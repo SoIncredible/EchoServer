@@ -152,11 +152,12 @@ namespace EchorServer
             
             // 添加字节序处理
             short bodyLength;
-            // if (BitConverter.IsLittleEndian)
-            // {
-            //     bodyLength = (short)((state.ReadBuffer[0] << 8) | state.ReadBuffer[1]);
-            // }
-            // else
+            if (!BitConverter.IsLittleEndian)
+            {
+                // 传过来的是小端数据 如果当前是大端的机器 那么
+                bodyLength = (short)((state.ReadBuffer[1] << 8) | state.ReadBuffer[0]);
+            }
+            else
             {
                 bodyLength = BitConverter.ToInt16(state.ReadBuffer, 0);
             }
@@ -251,12 +252,12 @@ namespace EchorServer
             // 在这里标识一下发送数据的长度
             var sendBodyLength = (short)bodyBytes.Length;
             var lenBytes = BitConverter.GetBytes(sendBodyLength);
-            // if (BitConverter.IsLittleEndian)
-            // {
-            //     // 这里只转换了表示协议长度的位?
-            //     Console.WriteLine("[Send] Reverse lenBytes");
-            //     lenBytes.Reverse();
-            // }
+            if (!BitConverter.IsLittleEndian)
+            {
+                // 这里只转换了表示协议长度的位?
+                Console.WriteLine("[Send] Reverse lenBytes");
+                lenBytes.Reverse();
+            }
             
             var sendBytes = lenBytes.Concat(bodyBytes).ToArray();
             cs.Socket.Send(sendBytes);
